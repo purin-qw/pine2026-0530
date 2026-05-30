@@ -1,0 +1,376 @@
+//@version=6
+strategy("v6 Native Double Strategy v4 MACD Risk Filter + Pattern Line", overlay=true, max_bars_back=500, max_lines_count=500, initial_capital=1000000, default_qty_type=strategy.percent_of_equity, default_qty_value=5, commission_type=strategy.commission.percent, commission_value=0.04, slippage=2, pyramiding=0, process_orders_on_close=false, calc_on_every_tick=false)
+
+// ===== INPUT =====
+pivotLen = input.int(5, "Pivot Length", minval=1, group="Pattern")
+minBars = input.int(10, "B-D 最小本数", minval=1, group="Pattern")
+maxBars = input.int(80, "B-D 最大本数", minval=2, group="Pattern")
+peakTol = input.float(0.25, "2山/2谷 許容差", minval=0.01, maxval=1.0, step=0.05, group="Pattern")
+heightRatio = input.float(0.80, "右山/右谷 深さ比", minval=0.1, maxval=1.0, step=0.1, group="Pattern")
+minHeightATR = input.float(2.0, "最小高さ ATR倍率", minval=0.0, step=0.1, group="Pattern")
+
+entryMode = input.string("Retest", "エントリー方式", options=["Break", "Retest"], group="Entry")
+tradeMTop = input.bool(true, "M TOP 売り", group="Trade")
+tradeWBot = input.bool(true, "W BOTTOM 買い", group="Trade")
+
+retestMaxBars = input.int(30, "リテスト待機 最大本数", minval=1, group="Retest")
+retestTolATR = input.float(0.25, "リテスト許容幅 ATR倍率", minval=0.0, step=0.05, group="Retest")
+rejectBufferATR = input.float(0.10, "反発確定バッファ ATR倍率", minval=0.0, step=0.05, group="Retest")
+
+rrRatio = input.float(1.2, "リスクリワード", minval=0.5, step=0.1, group="Exit")
+maxRiskATR = input.float(3.0, "最大リスク ATR倍率", minval=0.1, step=0.1, group="Exit")
+
+useEMAfilter = input.bool(true, "EMAフィルター", group="EMA Filter")
+showEMA = input.bool(true, "EMA表示", group="EMA Filter")
+emaFastLen = input.int(20, "EMA短期", minval=1, group="EMA Filter")
+emaMidLen = input.int(75, "EMA中期", minval=1, group="EMA Filter")
+emaSlowLen = input.int(200, "EMA長期", minval=1, group="EMA Filter")
+emaSlopeLen = input.int(5, "EMA傾き判定", minval=1, group="EMA Filter")
+emaDistanceATR = input.float(0.30, "EMA長期からの最低距離 ATR倍率", minval=0.0, step=0.1, group="EMA Filter")
+
+useMACDfilter = input.bool(true, "MACDフィルター", group="MACD Filter")
+macdFastLen = input.int(12, "MACD Fast", minval=1, group="MACD Filter")
+macdSlowLen = input.int(26, "MACD Slow", minval=1, group="MACD Filter")
+macdSignalLen = input.int(9, "MACD Signal", minval=1, group="MACD Filter")
+
+atrLen = input.int(14, "ATR期間", minval=1, group="ATR")
+
+useVolumeFilter = input.bool(false, "出来高フィルター", group="Filter")
+volLen = input.int(20, "出来高MA期間", minval=1, group="Filter")
+
+useDateFilter = input.bool(false, "期間フィルター", group="Backtest")
+fromDate = input.time(timestamp("2020-01-01 00:00"), "開始", group="Backtest")
+toDate = input.time(timestamp("2030-01-01 00:00"), "終了", group="Backtest")
+
+showEarlySignal = input.bool(true, "予備シグナル表示", group="Visual")
+showBreakSignal = input.bool(true, "ブレイク表示", group="Visual")
+showEntrySignal = input.bool(true, "エントリー表示", group="Visual")
+showNeckline = input.bool(true, "ネックライン表示", group="Visual")
+showTPSL = input.bool(true, "TP/SL表示", group="Visual")
+showPatternLine = input.bool(true, "M/W形ライン表示", group="Visual")
+keepPatternCount = input.int(20, "形ライン保持数", minval=1, maxval=100, group="Visual")
+showDebug = input.bool(true, "デバッグ表示", group="Debug")
+
+// ===== CALC =====
+emaFast = ta.ema(close, emaFastLen)
+emaMid = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+atrValue = ta.atr(atrLen)
+volMA = ta.sma(volume, volLen)
+
+[macdLine, macdSignal, macdHist] = ta.macd(close, macdFastLen, macdSlowLen, macdSignalLen)
+
+emaSlowUp = emaSlow > emaSlow[emaSlopeLen]
+emaSlowDown = emaSlow < emaSlow[emaSlopeLen]
+
+inWindow = not useDateFilter or (time >= fromDate and time <= toDate)
+volumeOK = not useVolumeFilter or volume > volMA
+
+shortEMAok = not useEMAfilter or (emaFast < emaMid and emaMid < emaSlow and emaSlowDown and close < emaFast and close < emaSlow - atrValue * emaDistanceATR)
+longEMAok = not useEMAfilter or (emaFast > emaMid and emaMid > emaSlow and emaSlowUp and close > emaFast and close > emaSlow + atrValue * emaDistanceATR)
+
+shortMACDok = not useMACDfilter or macdLine < macdSignal
+longMACDok = not useMACDfilter or macdLine > macdSignal
+
+shortTrendOK = shortEMAok and shortMACDok
+longTrendOK = longEMAok and longMACDok
+
+plot(showEMA ? emaFast : na, title="EMA Fast", color=color.new(color.aqua, 0), linewidth=1)
+plot(showEMA ? emaMid : na, title="EMA Mid", color=color.new(color.yellow, 0), linewidth=1)
+plot(showEMA ? emaSlow : na, title="EMA Slow", color=color.new(color.orange, 0), linewidth=2)
+
+// ===== PIVOT =====
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var array<float> pivPrice = array.new_float()
+var array<int> pivBar = array.new_int()
+var array<bool> pivIsHigh = array.new_bool()
+
+if not na(ph)
+    newPrice = ph
+    newBar = bar_index - pivotLen
+    newIsHigh = true
+    needPush = array.size(pivPrice) == 0
+
+    if not needPush
+        lastIndex = array.size(pivPrice) - 1
+        lastIsHigh = array.get(pivIsHigh, lastIndex)
+
+        if lastIsHigh != newIsHigh
+            needPush := true
+        else
+            lastPrice = array.get(pivPrice, lastIndex)
+            if newPrice > lastPrice
+                array.set(pivPrice, lastIndex, newPrice)
+                array.set(pivBar, lastIndex, newBar)
+                array.set(pivIsHigh, lastIndex, newIsHigh)
+
+    if needPush
+        array.push(pivPrice, newPrice)
+        array.push(pivBar, newBar)
+        array.push(pivIsHigh, newIsHigh)
+
+if not na(pl)
+    newPrice = pl
+    newBar = bar_index - pivotLen
+    newIsHigh = false
+    needPush = array.size(pivPrice) == 0
+
+    if not needPush
+        lastIndex = array.size(pivPrice) - 1
+        lastIsHigh = array.get(pivIsHigh, lastIndex)
+
+        if lastIsHigh != newIsHigh
+            needPush := true
+        else
+            lastPrice = array.get(pivPrice, lastIndex)
+            if newPrice < lastPrice
+                array.set(pivPrice, lastIndex, newPrice)
+                array.set(pivBar, lastIndex, newBar)
+                array.set(pivIsHigh, lastIndex, newIsHigh)
+
+    if needPush
+        array.push(pivPrice, newPrice)
+        array.push(pivBar, newBar)
+        array.push(pivIsHigh, newIsHigh)
+
+while array.size(pivPrice) > 30
+    array.shift(pivPrice)
+    array.shift(pivBar)
+    array.shift(pivIsHigh)
+
+// ===== PATTERN LINE STORAGE =====
+var array<line> patternLines = array.new_line()
+
+// ===== VARIABLES =====
+bool earlyM = false
+bool earlyW = false
+bool breakM = false
+bool breakW = false
+bool shortEntrySignal = false
+bool longEntrySignal = false
+bool shortRetestTouch = false
+bool longRetestTouch = false
+bool shortRetestReject = false
+bool longRetestReject = false
+
+float currentMNeckline = na
+float currentWNeckline = na
+
+var bool waitShortRetest = false
+var bool waitLongRetest = false
+var float shortNeckline = na
+var float longNeckline = na
+var float shortPatternSL = na
+var float longPatternSL = na
+var int shortBreakBar = na
+var int longBreakBar = na
+
+var float tpPrice = na
+var float slPrice = na
+
+// ===== PATTERN DETECTION =====
+if array.size(pivPrice) >= 3
+    n = array.size(pivPrice)
+
+    p1 = array.get(pivPrice, n - 3)
+    p2 = array.get(pivPrice, n - 2)
+    p3 = array.get(pivPrice, n - 1)
+
+    b1 = array.get(pivBar, n - 3)
+    b2 = array.get(pivBar, n - 2)
+    b3 = array.get(pivBar, n - 1)
+
+    h1 = array.get(pivIsHigh, n - 3)
+    h2 = array.get(pivIsHigh, n - 2)
+    h3 = array.get(pivIsHigh, n - 1)
+
+    dist = b3 - b1
+
+    // ===== M TOP =====
+    if h1 and not h2 and h3
+        leftPeak = p1
+        neckline = p2
+        rightPeak = p3
+
+        mBaseHeight = leftPeak - neckline
+        mTol = mBaseHeight * peakTol
+
+        mPeaksOK = mBaseHeight > 0 and rightPeak <= leftPeak and rightPeak >= leftPeak - mTol
+        mDepthOK = mBaseHeight > 0 and rightPeak - neckline >= mBaseHeight * heightRatio
+        mDistOK = dist >= minBars and dist <= maxBars
+        mAtrHeightOK = minHeightATR <= 0.0 or mBaseHeight >= atrValue * minHeightATR
+        mBreakOK = close < neckline and close[1] >= neckline
+
+        if mPeaksOK and mDepthOK and mDistOK and mAtrHeightOK and shortTrendOK and volumeOK
+            earlyM := true
+            currentMNeckline := neckline
+
+            if mBreakOK and tradeMTop and inWindow
+                breakM := true
+                patternSL = math.max(leftPeak, rightPeak)
+
+                if showPatternLine
+                    l1 = line.new(b1, leftPeak, b2, neckline, color=color.new(color.red, 0), width=2)
+                    l2 = line.new(b2, neckline, b3, rightPeak, color=color.new(color.red, 0), width=2)
+                    l3 = line.new(b2, neckline, bar_index, neckline, color=color.new(color.red, 0), width=2, style=line.style_dashed)
+
+                    array.push(patternLines, l1)
+                    array.push(patternLines, l2)
+                    array.push(patternLines, l3)
+
+                    while array.size(patternLines) > keepPatternCount * 3
+                        oldLine = array.shift(patternLines)
+                        line.delete(oldLine)
+
+                if entryMode == "Break" and strategy.position_size == 0
+                    slPrice := patternSL
+                    risk = slPrice - close
+                    riskOK = risk > syminfo.mintick and risk <= atrValue * maxRiskATR
+
+                    if riskOK
+                        tpPrice := close - risk * rrRatio
+                        strategy.entry("Short", strategy.short, alert_message="Break Short Entry")
+                        shortEntrySignal := true
+                else
+                    waitShortRetest := true
+                    waitLongRetest := false
+                    shortNeckline := neckline
+                    shortPatternSL := patternSL
+                    shortBreakBar := bar_index
+
+    // ===== W BOTTOM =====
+    if not h1 and h2 and not h3
+        leftLow = p1
+        neckline = p2
+        rightLow = p3
+
+        wBaseHeight = neckline - leftLow
+        wTol = wBaseHeight * peakTol
+
+        wLowsOK = wBaseHeight > 0 and rightLow >= leftLow and rightLow <= leftLow + wTol
+        wDepthOK = wBaseHeight > 0 and neckline - rightLow >= wBaseHeight * heightRatio
+        wDistOK = dist >= minBars and dist <= maxBars
+        wAtrHeightOK = minHeightATR <= 0.0 or wBaseHeight >= atrValue * minHeightATR
+        wBreakOK = close > neckline and close[1] <= neckline
+
+        if wLowsOK and wDepthOK and wDistOK and wAtrHeightOK and longTrendOK and volumeOK
+            earlyW := true
+            currentWNeckline := neckline
+
+            if wBreakOK and tradeWBot and inWindow
+                breakW := true
+                patternSL = math.min(leftLow, rightLow)
+
+                if showPatternLine
+                    l1 = line.new(b1, leftLow, b2, neckline, color=color.new(color.lime, 0), width=2)
+                    l2 = line.new(b2, neckline, b3, rightLow, color=color.new(color.lime, 0), width=2)
+                    l3 = line.new(b2, neckline, bar_index, neckline, color=color.new(color.lime, 0), width=2, style=line.style_dashed)
+
+                    array.push(patternLines, l1)
+                    array.push(patternLines, l2)
+                    array.push(patternLines, l3)
+
+                    while array.size(patternLines) > keepPatternCount * 3
+                        oldLine = array.shift(patternLines)
+                        line.delete(oldLine)
+
+                if entryMode == "Break" and strategy.position_size == 0
+                    slPrice := patternSL
+                    risk = close - slPrice
+                    riskOK = risk > syminfo.mintick and risk <= atrValue * maxRiskATR
+
+                    if riskOK
+                        tpPrice := close + risk * rrRatio
+                        strategy.entry("Long", strategy.long, alert_message="Break Long Entry")
+                        longEntrySignal := true
+                else
+                    waitLongRetest := true
+                    waitShortRetest := false
+                    longNeckline := neckline
+                    longPatternSL := patternSL
+                    longBreakBar := bar_index
+
+// ===== RETEST =====
+shortExpired = waitShortRetest and not na(shortBreakBar) and bar_index - shortBreakBar > retestMaxBars
+longExpired = waitLongRetest and not na(longBreakBar) and bar_index - longBreakBar > retestMaxBars
+
+if shortExpired
+    waitShortRetest := false
+    shortNeckline := na
+    shortPatternSL := na
+    shortBreakBar := na
+
+if longExpired
+    waitLongRetest := false
+    longNeckline := na
+    longPatternSL := na
+    longBreakBar := na
+
+shortRetestTouch := waitShortRetest and not na(shortNeckline) and high >= shortNeckline - atrValue * retestTolATR and low <= shortNeckline + atrValue * retestTolATR
+shortRetestReject := shortRetestTouch and close < open and close < shortNeckline - atrValue * rejectBufferATR
+
+longRetestTouch := waitLongRetest and not na(longNeckline) and low <= longNeckline + atrValue * retestTolATR and high >= longNeckline - atrValue * retestTolATR
+longRetestReject := longRetestTouch and close > open and close > longNeckline + atrValue * rejectBufferATR
+
+if entryMode == "Retest" and shortRetestReject and strategy.position_size == 0 and inWindow and not na(shortPatternSL)
+    slPrice := shortPatternSL
+    risk = slPrice - close
+    riskOK = risk > syminfo.mintick and risk <= atrValue * maxRiskATR
+
+    if riskOK
+        tpPrice := close - risk * rrRatio
+        strategy.entry("Short", strategy.short, alert_message="Retest Short Entry")
+        shortEntrySignal := true
+        waitShortRetest := false
+        shortNeckline := na
+        shortPatternSL := na
+        shortBreakBar := na
+
+if entryMode == "Retest" and longRetestReject and strategy.position_size == 0 and inWindow and not na(longPatternSL)
+    slPrice := longPatternSL
+    risk = close - slPrice
+    riskOK = risk > syminfo.mintick and risk <= atrValue * maxRiskATR
+
+    if riskOK
+        tpPrice := close + risk * rrRatio
+        strategy.entry("Long", strategy.long, alert_message="Retest Long Entry")
+        longEntrySignal := true
+        waitLongRetest := false
+        longNeckline := na
+        longPatternSL := na
+        longBreakBar := na
+
+// ===== EXIT =====
+if strategy.position_size < 0
+    strategy.exit("Exit Short", from_entry="Short", stop=slPrice, limit=tpPrice)
+
+if strategy.position_size > 0
+    strategy.exit("Exit Long", from_entry="Long", stop=slPrice, limit=tpPrice)
+
+if useDateFilter and not inWindow and strategy.position_size != 0
+    strategy.close_all()
+
+// ===== VISUAL =====
+plotshape(showEarlySignal and earlyM, title="予備 M TOP", style=shape.circle, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="M?")
+plotshape(showEarlySignal and earlyW, title="予備 W BOTTOM", style=shape.circle, location=location.belowbar, color=color.new(color.aqua, 0), size=size.tiny, text="W?")
+
+plotshape(showBreakSignal and breakM, title="M TOP ブレイク", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="B")
+plotshape(showBreakSignal and breakW, title="W BOTTOM ブレイク", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.small, text="B")
+
+plotshape(showEntrySignal and shortEntrySignal, title="Short Entry", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.small, text="SELL")
+plotshape(showEntrySignal and longEntrySignal, title="Long Entry", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.small, text="BUY")
+
+plot(showNeckline ? currentMNeckline : na, title="M Neckline", color=color.new(color.red, 40), linewidth=1, style=plot.style_linebr)
+plot(showNeckline ? currentWNeckline : na, title="W Neckline", color=color.new(color.lime, 40), linewidth=1, style=plot.style_linebr)
+
+plot(showTPSL and strategy.position_size != 0 ? tpPrice : na, title="TP", color=color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+plot(showTPSL and strategy.position_size != 0 ? slPrice : na, title="SL", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+
+plotshape(showDebug and waitShortRetest, title="Short Retest Waiting", style=shape.square, location=location.abovebar, color=color.new(color.red, 70), size=size.tiny, text="待S")
+plotshape(showDebug and waitLongRetest, title="Long Retest Waiting", style=shape.square, location=location.belowbar, color=color.new(color.green, 70), size=size.tiny, text="待L")
+plotshape(showDebug and shortRetestTouch, title="Short Retest Touch", style=shape.diamond, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny, text="触S")
+plotshape(showDebug and longRetestTouch, title="Long Retest Touch", style=shape.diamond, location=location.belowbar, color=color.new(color.green, 20), size=size.tiny, text="触L")
+plotshape(showDebug and shortExpired, title="Short Retest Expired", style=shape.xcross, location=location.abovebar, color=color.new(color.gray, 0), size=size.tiny, text="失S")
+plotshape(showDebug and longExpired, title="Long Retest Expired", style=shape.xcross, location=location.belowbar, color=color.new(color.gray, 0), size=size.tiny, text="失L")
