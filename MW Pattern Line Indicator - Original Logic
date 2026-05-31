@@ -1,0 +1,226 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © kravitzz
+
+//@version=6
+indicator("MW Pattern Line Indicator - Original Logic", overlay=true, max_bars_back=500, max_lines_count=500)
+
+// ===== INPUT =====
+pivotLen = input.int(5, "Pivot Length", minval=1, group="Pattern")
+minBars = input.int(10, "B-D 最小本数", minval=1, group="Pattern")
+maxBars = input.int(80, "B-D 最大本数", minval=2, group="Pattern")
+peakTol = input.float(0.25, "2山/2谷 許容差", minval=0.01, maxval=1.0, step=0.05, group="Pattern")
+heightRatio = input.float(0.80, "右山/右谷 深さ比", minval=0.1, maxval=1.0, step=0.1, group="Pattern")
+minHeightATR = input.float(2.0, "最小高さ ATR倍率", minval=0.0, step=0.1, group="Pattern")
+
+showPatternLine = input.bool(true, "M/W形ライン表示", group="Visual")
+showBreakSignal = input.bool(true, "Breakサイン表示", group="Visual")
+showRetestSignal = input.bool(true, "Retestサイン表示", group="Visual")
+keepPatternCount = input.int(50, "形ライン保持数", minval=1, maxval=100, group="Visual")
+
+retestMaxBars = input.int(30, "Retest待機本数", minval=1, group="Retest")
+retestTolATR = input.float(0.25, "Retest許容幅 ATR倍率", minval=0.0, step=0.05, group="Retest")
+rejectBufferATR = input.float(0.10, "反発確定バッファ ATR倍率", minval=0.0, step=0.05, group="Retest")
+
+atrLen = input.int(14, "ATR期間", minval=1, group="ATR")
+
+// ===== CALC =====
+atrValue = ta.atr(atrLen)
+
+// ===== PIVOT =====
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var array<float> pivPrice = array.new_float()
+var array<int> pivBar = array.new_int()
+var array<bool> pivIsHigh = array.new_bool()
+
+if not na(ph)
+    newPrice = ph
+    newBar = bar_index - pivotLen
+    newIsHigh = true
+    needPush = array.size(pivPrice) == 0
+
+    if not needPush
+        lastIndex = array.size(pivPrice) - 1
+        lastIsHigh = array.get(pivIsHigh, lastIndex)
+
+        if lastIsHigh != newIsHigh
+            needPush := true
+        else
+            lastPrice = array.get(pivPrice, lastIndex)
+            if newPrice > lastPrice
+                array.set(pivPrice, lastIndex, newPrice)
+                array.set(pivBar, lastIndex, newBar)
+                array.set(pivIsHigh, lastIndex, newIsHigh)
+
+    if needPush
+        array.push(pivPrice, newPrice)
+        array.push(pivBar, newBar)
+        array.push(pivIsHigh, newIsHigh)
+
+if not na(pl)
+    newPrice = pl
+    newBar = bar_index - pivotLen
+    newIsHigh = false
+    needPush = array.size(pivPrice) == 0
+
+    if not needPush
+        lastIndex = array.size(pivPrice) - 1
+        lastIsHigh = array.get(pivIsHigh, lastIndex)
+
+        if lastIsHigh != newIsHigh
+            needPush := true
+        else
+            lastPrice = array.get(pivPrice, lastIndex)
+            if newPrice < lastPrice
+                array.set(pivPrice, lastIndex, newPrice)
+                array.set(pivBar, lastIndex, newBar)
+                array.set(pivIsHigh, lastIndex, newIsHigh)
+
+    if needPush
+        array.push(pivPrice, newPrice)
+        array.push(pivBar, newBar)
+        array.push(pivIsHigh, newIsHigh)
+
+while array.size(pivPrice) > 30
+    array.shift(pivPrice)
+    array.shift(pivBar)
+    array.shift(pivIsHigh)
+
+// ===== LINE STORAGE =====
+var array<line> patternLines = array.new_line()
+
+// ===== RETEST STATE =====
+var bool waitShortRetest = false
+var bool waitLongRetest = false
+var float shortNeckline = na
+var float longNeckline = na
+var int shortBreakBar = na
+var int longBreakBar = na
+
+// ===== SIGNAL =====
+bool breakM = false
+bool breakW = false
+bool retestM = false
+bool retestW = false
+
+// ===== PATTERN DETECTION =====
+if array.size(pivPrice) >= 3
+    n = array.size(pivPrice)
+
+    p1 = array.get(pivPrice, n - 3)
+    p2 = array.get(pivPrice, n - 2)
+    p3 = array.get(pivPrice, n - 1)
+
+    b1 = array.get(pivBar, n - 3)
+    b2 = array.get(pivBar, n - 2)
+    b3 = array.get(pivBar, n - 1)
+
+    h1 = array.get(pivIsHigh, n - 3)
+    h2 = array.get(pivIsHigh, n - 2)
+    h3 = array.get(pivIsHigh, n - 1)
+
+    dist = b3 - b1
+
+    // ===== M TOP =====
+    if h1 and not h2 and h3
+        leftPeak = p1
+        neckline = p2
+        rightPeak = p3
+
+        mBaseHeight = leftPeak - neckline
+        mTol = mBaseHeight * peakTol
+
+        mPeaksOK = mBaseHeight > 0 and rightPeak <= leftPeak and rightPeak >= leftPeak - mTol
+        mDepthOK = mBaseHeight > 0 and rightPeak - neckline >= mBaseHeight * heightRatio
+        mDistOK = dist >= minBars and dist <= maxBars
+        mAtrHeightOK = minHeightATR <= 0.0 or mBaseHeight >= atrValue * minHeightATR
+        mBreakOK = close < neckline and close[1] >= neckline
+
+        if mPeaksOK and mDepthOK and mDistOK and mAtrHeightOK and mBreakOK
+            breakM := true
+            waitShortRetest := true
+            waitLongRetest := false
+            shortNeckline := neckline
+            shortBreakBar := bar_index
+
+            if showPatternLine
+                l1 = line.new(b1, leftPeak, b2, neckline, color=color.new(color.red, 0), width=2)
+                l2 = line.new(b2, neckline, b3, rightPeak, color=color.new(color.red, 0), width=2)
+                l3 = line.new(b2, neckline, bar_index, neckline, color=color.new(color.red, 0), width=2, style=line.style_dashed)
+
+                array.push(patternLines, l1)
+                array.push(patternLines, l2)
+                array.push(patternLines, l3)
+
+    // ===== W BOTTOM =====
+    if not h1 and h2 and not h3
+        leftLow = p1
+        neckline = p2
+        rightLow = p3
+
+        wBaseHeight = neckline - leftLow
+        wTol = wBaseHeight * peakTol
+
+        wLowsOK = wBaseHeight > 0 and rightLow >= leftLow and rightLow <= leftLow + wTol
+        wDepthOK = wBaseHeight > 0 and neckline - rightLow >= wBaseHeight * heightRatio
+        wDistOK = dist >= minBars and dist <= maxBars
+        wAtrHeightOK = minHeightATR <= 0.0 or wBaseHeight >= atrValue * minHeightATR
+        wBreakOK = close > neckline and close[1] <= neckline
+
+        if wLowsOK and wDepthOK and wDistOK and wAtrHeightOK and wBreakOK
+            breakW := true
+            waitLongRetest := true
+            waitShortRetest := false
+            longNeckline := neckline
+            longBreakBar := bar_index
+
+            if showPatternLine
+                l1 = line.new(b1, leftLow, b2, neckline, color=color.new(color.lime, 0), width=2)
+                l2 = line.new(b2, neckline, b3, rightLow, color=color.new(color.lime, 0), width=2)
+                l3 = line.new(b2, neckline, bar_index, neckline, color=color.new(color.lime, 0), width=2, style=line.style_dashed)
+
+                array.push(patternLines, l1)
+                array.push(patternLines, l2)
+                array.push(patternLines, l3)
+
+while array.size(patternLines) > keepPatternCount * 3
+    oldLine = array.shift(patternLines)
+    line.delete(oldLine)
+
+// ===== RETEST =====
+shortExpired = waitShortRetest and not na(shortBreakBar) and bar_index - shortBreakBar > retestMaxBars
+longExpired = waitLongRetest and not na(longBreakBar) and bar_index - longBreakBar > retestMaxBars
+
+if shortExpired
+    waitShortRetest := false
+    shortNeckline := na
+    shortBreakBar := na
+
+if longExpired
+    waitLongRetest := false
+    longNeckline := na
+    longBreakBar := na
+
+shortTouch = waitShortRetest and not na(shortNeckline) and high >= shortNeckline - atrValue * retestTolATR and low <= shortNeckline + atrValue * retestTolATR
+longTouch = waitLongRetest and not na(longNeckline) and low <= longNeckline + atrValue * retestTolATR and high >= longNeckline - atrValue * retestTolATR
+
+retestM := shortTouch and close < open and close < shortNeckline - atrValue * rejectBufferATR
+retestW := longTouch and close > open and close > longNeckline + atrValue * rejectBufferATR
+
+if retestM
+    waitShortRetest := false
+    shortNeckline := na
+    shortBreakBar := na
+
+if retestW
+    waitLongRetest := false
+    longNeckline := na
+    longBreakBar := na
+
+// ===== VISUAL =====
+plotshape(showBreakSignal and breakM, title="M TOP Break", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.small, text="BREAK")
+plotshape(showBreakSignal and breakW, title="W Bottom Break", style=shape.labelup, location=location.belowbar, color=color.new(color.lime, 0), textcolor=color.black, size=size.small, text="BREAK")
+
+plotshape(showRetestSignal and retestM, title="M TOP Retest", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.small, text="RETEST")
+plotshape(showRetestSignal and retestW, title="W Bottom Retest", style=shape.labelup, location=location.belowbar, color=color.new(color.lime, 0), textcolor=color.black, size=size.small, text="RETEST")
